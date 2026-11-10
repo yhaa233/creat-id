@@ -100,6 +100,11 @@ public final class RecipeIndex {
     }
 
     /** 某条配方的输入槽（槽内 id 用 | 分隔，数量用 # 表示）。 */
+    /** Output entries WITH counts (e.g. "mekanism:uranium_hexafluoridex2"). */
+    public static List<String> outputAmountsOf(String recipeId) {
+        RecipeScanner.Snapshot snapshot = byId.get(recipeId);
+        return snapshot == null ? List.of() : snapshot.outputs();
+    }
     /** Output ids (without counts) of one recipe. */
     public static List<String> outputsOf(String recipeId) {
         RecipeScanner.Snapshot snapshot = byId.get(recipeId);
