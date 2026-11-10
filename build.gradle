@@ -136,17 +136,6 @@ dependencies {
     // AE2 的编译期 API（不参与打包，也不会被强制要求存在）
     compileOnly 'appeng:appliedenergistics2:19.2.18@jar'
 
-    // Mekanism: compile-time only, guarded at runtime by ModList.isLoaded("mekanism")
-    // Prefer a local jar when present (offline builds), otherwise resolve from Modrinth maven.
-    def mekLocal = file("${rootDir}/../mekanism-local.jar")
-    if (mekLocal.exists()) {
-        compileOnly files(mekLocal)
-    } else {
-        compileOnly("maven.modrinth:mekanism:10.7.19.85") {
-            transitive = false
-        }
-    }
-
     // Example optional mod dependency with JEI
     // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
     // compileOnly "mezz.jei:jei-${mc_version}-common-api:${jei_version}"
