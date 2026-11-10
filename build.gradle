@@ -32,6 +32,13 @@ repositories {
     // 轮椅要调用 AE2 的合成终端界面，这里只拿编译期 API。
     // 运行期由玩家自己安装的 AE2 提供；没装时 Ae2Compat 会直接跳过，不会崩。
     // AE2 没有公开的 maven（modmaven 只到 19.0.x），所以直接指向 Modrinth 的 CDN。
+    // Modrinth maven（Mekanism 等可选依赖的编译期来源）
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content { includeGroup 'maven.modrinth' }
+    }
+
     ivy {
         name = 'ModrinthAE2'
         url = 'https://cdn.modrinth.com/data/XxWD5pD3/versions/KDnFUmMm'
@@ -130,7 +137,15 @@ dependencies {
     compileOnly 'appeng:appliedenergistics2:19.2.18@jar'
 
     // Mekanism: compile-time only, guarded at runtime by ModList.isLoaded("mekanism")
-    compileOnly files('F:/mc/versions/NAST hard d1.2.1/mods/Mekanism-1.21.1-10.7.19.85.jar')
+    // Prefer a local jar when present (offline builds), otherwise resolve from Modrinth maven.
+    def mekLocal = file("${rootDir}/../mekanism-local.jar")
+    if (mekLocal.exists()) {
+        compileOnly files(mekLocal)
+    } else {
+        compileOnly("maven.modrinth:mekanism:10.7.19.85") {
+            transitive = false
+        }
+    }
 
     // Example optional mod dependency with JEI
     // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
