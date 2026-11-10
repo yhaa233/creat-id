@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+!build/libs/*.jar
+
+# 开发环境运行目录（含存档、日志、大量模组）
+run/
+runs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 本地备份
+backup/
+patch-jar.ps1
