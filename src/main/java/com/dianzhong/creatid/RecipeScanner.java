@@ -77,14 +77,157 @@ public final class RecipeScanner {
                 // 读不到就算了
             }
         }
+        if (inputs.isEmpty() || slots.isEmpty()) {
+            List<String> fieldSlots = new ArrayList<>();
+            List<String> fieldInputs = new ArrayList<>();
+            for (java.lang.reflect.Field field : recipe.getClass().getFields()) {
+                try {
+                    Object value = field.get(recipe);
+                    if (value == null) {
+                        continue;
+                    }
+                    boolean isOutput = field.getName().toLowerCase(java.util.Locale.ROOT).contains("output")
+                            || field.getName().toLowerCase(java.util.Locale.ROOT).contains("result");
+                    if (isOutput) {
+                        continue;
+                    }
+                    collectSlots(value, fieldSlots);
+                    collectFlat(value, fieldInputs);
+                } catch (Throwable ignored) {
+                    // 读不到就跳过这个字段
+                }
+            }
+            if (slots.isEmpty()) {
+                slots.addAll(fieldSlots);
+            }
+            if (inputs.isEmpty()) {
+                inputs.addAll(fieldInputs);
+            }
+        }
 
-        return new Snapshot(id, type, inputs, outputs(recipe), slots);
+        List<String> outputs = outputs(recipe);
+        if (outputs.size() == 1 && outputs.get(0).startsWith("UNKNOWN")) {
+            List<String> fromFields = new ArrayList<>();
+            for (java.lang.reflect.Field field : recipe.getClass().getFields()) {
+                String fieldName = field.getName().toLowerCase(java.util.Locale.ROOT);
+                if (!fieldName.contains("output") && !fieldName.contains("result")) {
+                    continue;
+                }
+                try {
+                    collectOutputs(field.get(recipe), fromFields);
+                } catch (Throwable ignored) {
+                    // 跳过
+                }
+            }
+            if (!fromFields.isEmpty()) {
+                outputs = fromFields;
+            }
+        }
+        if (recipe.getClass().getName().contains("DissolutionChamber")) {
+            StringBuilder fieldNames = new StringBuilder();
+            for (java.lang.reflect.Field field : recipe.getClass().getFields()) {
+                fieldNames.append(field.getName()).append(':').append(field.getType().getSimpleName()).append(' ');
+            }
+            com.dianzhong.creatid.CreatId.LOGGER.info("dissolution fields {} -> {}", id, fieldNames);
+        }
+        // 工业先锋专用适配：字段名是确定的，直接按名字读，不走启发式
+        String className = recipe.getClass().getName();
+        if (className.startsWith("com.buuz135.industrial.recipe.")) {
+            for (String fieldName : new String[]{"input", "inputFluid"}) {
+                try {
+                    java.lang.reflect.Field field = recipe.getClass().getField(fieldName);
+                    Object value = field.get(recipe);
+                    if (value == null) {
+                        continue;
+                    }
+                    java.util.List<String> found = new ArrayList<>();
+                    collectSlots(value, found);
+                    if (found.isEmpty() && recipe instanceof net.minecraft.world.item.crafting.Recipe<?> asRecipe) {
+                        // getStacks() 对标签型流体返回空：退回到配方自己的 codec 序列化，直接读出 id 与数量
+                        try {
+                            com.mojang.serialization.Codec rawCodec =
+                                    (com.mojang.serialization.Codec) asRecipe.getSerializer().codec().codec();
+                            var encoded = rawCodec.encodeStart(net.minecraft.nbt.NbtOps.INSTANCE, asRecipe);
+                            if (encoded.result().isPresent() && encoded.result().get() instanceof net.minecraft.nbt.CompoundTag tag) {
+                                java.util.List<String> fromCodec = new ArrayList<>();
+                                collectFluidTags(tag, fromCodec);
+                                found.addAll(fromCodec);
+                            }
+                        } catch (Throwable t) {
+                            com.dianzhong.creatid.CreatId.LOGGER.warn("codec fluid read failed for {}", id, t);
+                        }
+                    }                    if (fieldName.equals("inputFluid")) {
+                        com.dianzhong.creatid.CreatId.LOGGER.info(
+                                "inputFluid {} -> class={} collected={}", id, value.getClass().getSimpleName(), found);
+                    }
+                    java.util.List<String> flat = new ArrayList<>();
+                    collectFlat(value, flat);
+                    for (String slot : found) {
+                        if (!slots.contains(slot)) {
+                            slots.add(slot);
+                        }
+                    }
+                    for (String option : flat) {
+                        if (!inputs.contains(option)) {
+                            inputs.add(option);
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // 这个配方没有该字段
+                }
+            }
+        }
+        // 液体字段单独扫：不管物品槽是否为空都要收集，否则溶解室这类配方会漏掉液体要求
+        for (java.lang.reflect.Field field : recipe.getClass().getFields()) {
+            String fieldType = field.getType().getName().toLowerCase(java.util.Locale.ROOT);
+            String fieldName = field.getName().toLowerCase(java.util.Locale.ROOT);
+            if (!fieldType.contains("fluid") && !fieldName.contains("fluid")) {
+                continue;
+            }
+            if (fieldName.contains("output")) {
+                continue;
+            }
+            try {
+                Object value = field.get(recipe);
+                if (value == null) {
+                    continue;
+                }
+                java.util.List<String> fluidSlots = new ArrayList<>();
+                collectSlots(value, fluidSlots);
+                for (String fluidSlot : fluidSlots) {
+                    if (!slots.contains(fluidSlot)) {
+                        slots.add(fluidSlot);
+                    }
+                }
+            } catch (Throwable ignored) {
+                // 跳过这个字段
+            }
+        }
+        return new Snapshot(id, type, inputs, outputs, slots);
     }
+
 
     // ------------------------------------------------------------------
     // 输入：摊平版（兼容旧格式）
     // ------------------------------------------------------------------
 
+    /** 从配方 NBT 里找流体条目：含 "fluid" 字符串 + "amount" 数字的复合标签。 */
+    private static void collectFluidTags(net.minecraft.nbt.Tag tag, List<String> out) {
+        if (tag instanceof net.minecraft.nbt.CompoundTag compound) {
+            String fluid = compound.contains("fluid") ? compound.getString("fluid")
+                    : (compound.contains("Fluid") ? compound.getString("Fluid") : null);
+            if (fluid != null && !fluid.isEmpty() && compound.contains("amount")) {
+                out.add(fluid + "#" + compound.getInt("amount"));
+            }
+            for (String key : compound.getAllKeys()) {
+                collectFluidTags(compound.get(key), out);
+            }
+        } else if (tag instanceof net.minecraft.nbt.ListTag list) {
+            for (int i = 0; i < list.size(); i++) {
+                collectFluidTags(list.get(i), out);
+            }
+        }
+    }
     private static List<String> flatInputs(Object recipe) {
         List<String> raw = new ArrayList<>();
         if (recipe instanceof CraftingRecipe crafting) {
@@ -127,7 +270,30 @@ public final class RecipeScanner {
             }
             return;
         }
-        if (value instanceof Ingredient ingredient) {
+        if (value instanceof net.neoforged.neoforge.fluids.crafting.FluidIngredient fluidIngredient) {
+            net.neoforged.neoforge.fluids.FluidStack[] fluids = fluidIngredient.getStacks();
+            if (fluids.length > 0) {
+                LinkedHashSet<String> ids = new LinkedHashSet<>();
+                long amount = 1;
+                for (net.neoforged.neoforge.fluids.FluidStack fluid : fluids) {
+                    if (!fluid.isEmpty()) {
+                        ids.add(String.valueOf(net.minecraft.core.registries.BuiltInRegistries.FLUID
+                                .getKey(fluid.getFluid())));
+                        amount = Math.max(amount, fluid.getAmount());
+                    }
+                }
+                if (!ids.isEmpty()) {
+                    out.add(String.join("|", ids) + "#" + amount);
+                }
+            }
+            return;
+        }        if (value instanceof net.neoforged.neoforge.fluids.FluidStack fluidStack) {
+            if (!fluidStack.isEmpty()) {
+                var fluidKey = net.minecraft.core.registries.BuiltInRegistries.FLUID.getKey(fluidStack.getFluid());
+                out.add(fluidKey + "#" + fluidStack.getAmount());
+            }
+            return;
+        }        if (value instanceof Ingredient ingredient) {
             var items = ingredient.getItems();
             if (items.length > 0) {
                 out.add(idOf(items[0]));
