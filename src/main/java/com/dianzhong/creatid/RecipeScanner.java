@@ -101,7 +101,8 @@ public final class RecipeScanner {
         }
         for (Method method : recipe.getClass().getMethods()) {
             String name = method.getName();
-            if (!name.equals("getIngredients") && !name.matches("get[A-Za-z]*Input[A-Za-z]*")) {
+            if (!name.equals("getIngredients") && !name.equals("getCatalyst") && !name.equals("catalyst")
+                    && !name.matches("(?i)[a-z]*input[a-z]*")) {
                 continue;
             }
             if (method.getParameterCount() != 0) {
@@ -181,7 +182,8 @@ public final class RecipeScanner {
         }
         for (Method method : recipe.getClass().getMethods()) {
             String name = method.getName();
-            if (!name.equals("getIngredients") && !name.matches("get[A-Za-z]*Input[A-Za-z]*")) {
+            if (!name.equals("getIngredients") && !name.equals("getCatalyst") && !name.equals("catalyst")
+                    && !name.matches("(?i)[a-z]*input[a-z]*")) {
                 continue;
             }
             if (method.getParameterCount() != 0) {
@@ -222,6 +224,34 @@ public final class RecipeScanner {
                 collectSlots(item, out);
             }
             return;
+        }
+        // NeoForge 的 SizedIngredient：里面包着一个 Ingredient 和一个数量
+        for (String accessor : new String[]{"ingredient", "getIngredient"}) {
+            try {
+                Object inner = value.getClass().getMethod(accessor).invoke(value);
+                if (inner != null && inner != value) {
+                    long count = 1;
+                    try {
+                        Object rawCount = value.getClass().getMethod("count").invoke(value);
+                        if (rawCount instanceof Number number) {
+                            count = number.longValue();
+                        }
+                    } catch (Throwable ignored) {
+                        // 没有 count 就按 1 处理
+                    }
+                    java.util.List<String> nested = new ArrayList<>();
+                    collectSlots(inner, nested);
+                    for (String slot : nested) {
+                        int at = slot.lastIndexOf('#');
+                        String ids = at > 0 ? slot.substring(0, at) : slot;
+                        long base = at > 0 ? Long.parseLong(slot.substring(at + 1)) : 1;
+                        out.add(ids + "#" + (base * count));
+                    }
+                    return;
+                }
+            } catch (Throwable ignored) {
+                // 换下一个方法名
+            }
         }
         // Mekanism 配料包装：一个包装 = 一个槽，代表们是可选值
         try {

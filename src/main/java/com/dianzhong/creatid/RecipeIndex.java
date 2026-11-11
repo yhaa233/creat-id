@@ -128,12 +128,8 @@ public final class RecipeIndex {
         if (snapshot == null) {
             return List.of();
         }
-        List<String> out = new ArrayList<>();
-        for (String entry : snapshot.inputs()) {
-            int at = entry.lastIndexOf('x');
-            out.add(at > 0 ? entry.substring(0, at) : entry);
-        }
-        return out;
+        // 输入列没有数量后缀，直接返回；不能用 lastIndexOf('x') 去切，否则会把 id 里的 x 切掉
+        return new ArrayList<>(snapshot.inputs());
     }
     public static RecipeScanner.Snapshot get(String recipeId) {
         return byId.get(recipeId);
