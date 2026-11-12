@@ -316,6 +316,8 @@ public final class RecipeScanner {
                 }
                 java.util.List<String> fluidSlots = new ArrayList<>();
                 collectSlots(value, fluidSlots);
+                // 自定义流体包装（如现代工业化的 FluidInput）走专用解包
+                collectFluidValue(value, fluidSlots);
                 for (String fluidSlot : fluidSlots) {
                     if (!slots.contains(fluidSlot)) {
                         slots.add(fluidSlot);
@@ -327,6 +329,37 @@ public final class RecipeScanner {
         }
         // 机械动力：按确切字段名读取，优先于通用扫描
         collectCreate(recipe, slots, inputs);
+        collectModernIndustrialization(recipe, slots);
+        collectOritech(recipe, slots);
+
+        // 净化：只保留真实注册过的物品 / 流体 id，去掉标签解析失败留下的假 id
+        for (int si = 0; si < slots.size(); si++) {
+            String slot = slots.get(si);
+            int at = slot.lastIndexOf('#');
+            String idsPart = at > 0 ? slot.substring(0, at) : slot;
+            String amountPart = at > 0 ? slot.substring(at) : "#1";
+            java.util.List<String> keep = new ArrayList<>();
+            for (String rawId : idsPart.split("\\|")) {
+                String entry = rawId.trim();
+                var rl = net.minecraft.resources.ResourceLocation.tryParse(entry);
+                if (rl == null) {
+                    continue;
+                }
+                if (entry.equals("minecraft:empty")) {
+                    continue;
+                }
+                if (net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(rl)
+                        || net.minecraft.core.registries.BuiltInRegistries.FLUID.containsKey(rl)) {
+                    keep.add(entry);
+                }
+            }
+            if (keep.isEmpty()) {
+                slots.remove(si);
+                si--;
+            } else {
+                slots.set(si, String.join("|", keep) + amountPart);
+            }
+        }
 
         slots.removeIf(RecipeScanner::isCatalystSlot);
         return new Snapshot(id, type, inputs, outputs, slots);
@@ -542,13 +575,18 @@ public final class RecipeScanner {
             return;
         }
         // NeoForge 的 SizedFluidIngredient：里面包着 FluidIngredient 与数量
-        for (String accessor : new String[]{"ingredient", "getIngredient"}) {
+        for (String accessor : new String[]{"ingredient", "getIngredient", "fluid", "getFluid"}) {
             try {
                 Object inner = value.getClass().getMethod(accessor).invoke(value);
                 if (inner != null && inner != value) {
                     long count = 1;
                     try {
-                        Object rawCount = value.getClass().getMethod("count").invoke(value);
+                        Object rawCount;
+                        try {
+                            rawCount = value.getClass().getMethod("count").invoke(value);
+                        } catch (Throwable ignored) {
+                            rawCount = value.getClass().getMethod("amount").invoke(value);
+                        }
                         if (rawCount instanceof Number number) {
                             count = Math.max(1, number.longValue());
                         }
@@ -588,6 +626,138 @@ public final class RecipeScanner {
             }
         } catch (Throwable ignored) {
             // 不是流体原料
+        }
+    }
+
+
+    /**
+     * 现代工业化专用适配。
+     * <p>
+     * MachineRecipe 的流体放在 {@code List<FluidInput> fluidInputs} 里，
+     * FluidInput 是 record：{@code fluid()}, {@code amount()}, {@code probability()}，
+     * 并提供 {@code getInputFluids()} 返回已解析的流体列表。
+     * 直接用它的 API，绕开 NeoForge FluidIngredient 的解析差异。
+     */
+    private static void collectModernIndustrialization(Object recipe, List<String> slots) {
+        if (!recipe.getClass().getName().startsWith("aztech.modern_industrialization")) {
+            return;
+        }
+        for (java.lang.reflect.Field field : hierarchyFields(recipe.getClass())) {
+            String name = field.getName().toLowerCase(java.util.Locale.ROOT);
+            if (!name.equals("fluidinputs")) {
+                continue;
+            }
+            try {
+                Object value = field.get(recipe);
+                if (!(value instanceof Iterable<?> list)) {
+                    continue;
+                }
+                for (Object element : list) {
+                    long amount = 1;
+                    try {
+                        Object raw = element.getClass().getMethod("amount").invoke(element);
+                        if (raw instanceof Number number) {
+                            amount = Math.max(1, number.longValue());
+                        }
+                    } catch (Throwable ignored) {
+                        // 没有 amount 就按 1
+                    }
+                    LinkedHashSet<String> ids = new LinkedHashSet<>();
+                    try {
+                        Object fluids = element.getClass().getMethod("getInputFluids").invoke(element);
+                        if (fluids instanceof Iterable<?> fluidList) {
+                            for (Object fluid : fluidList) {
+                                if (fluid instanceof net.minecraft.world.level.material.Fluid f) {
+                                    ids.add(String.valueOf(net.minecraft.core.registries.BuiltInRegistries
+                                            .FLUID.getKey(f)));
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                        // 退回读 fluid() 字段
+                    }
+                    if (ids.isEmpty()) {
+                        try {
+                            Object ing = element.getClass().getMethod("fluid").invoke(element);
+                            java.util.List<String> nested = new ArrayList<>();
+                            collectFluidValue(ing, nested);
+                            for (String slot : nested) {
+                                int at = slot.lastIndexOf('#');
+                                String idPart = at > 0 ? slot.substring(0, at) : slot;
+                                for (String id : idPart.split("\\|")) {
+                                    ids.add(id.trim());
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                            // 无解
+                        }
+                    }
+                    if (!ids.isEmpty()) {
+                        slots.add(String.join("|", ids) + "#" + amount);
+                    }
+                }
+            } catch (Throwable ignored) {
+                // 跳过这个字段
+            }
+        }
+    }
+
+
+    /**
+     * 奥瑞科技专用适配。
+     * <p>
+     * OritechRecipe 的流体输入是单个 {@code rearth.oritech.util.FluidIngredient} record：
+     * {@code fluidContent}（Either&lt;TagKey&lt;Fluid&gt;, ResourceLocation&gt;）+ {@code amount}。
+     * 注意它的类型不是 NeoForge 的 FluidIngredient，所以必须单独解包。
+     */
+    private static void collectOritech(Object recipe, List<String> slots) {
+        if (!recipe.getClass().getName().startsWith("rearth.oritech")) {
+            return;
+        }
+        for (java.lang.reflect.Field field : hierarchyFields(recipe.getClass())) {
+            if (!field.getName().equalsIgnoreCase("fluidInput")) {
+                continue;
+            }
+            try {
+                Object value = field.get(recipe);
+                if (value == null) {
+                    continue;
+                }
+                long amount = 1;
+                Object rawAmount = value.getClass().getMethod("amount").invoke(value);
+                if (rawAmount instanceof Number number) {
+                    amount = Math.max(1, number.longValue());
+                }
+                Object content = value.getClass().getMethod("fluidContent").invoke(value);
+                if (!(content instanceof com.mojang.datafixers.util.Either<?, ?> either)) {
+                    continue;
+                }
+                LinkedHashSet<String> ids = new LinkedHashSet<>();
+                Object right = either.right().orElse(null);
+                if (right instanceof net.minecraft.resources.ResourceLocation rl) {
+                    ids.add(rl.toString());
+                }
+                Object left = either.left().orElse(null);
+                if (left instanceof net.minecraft.tags.TagKey<?> tagKey) {
+                    @SuppressWarnings("unchecked")
+                    net.minecraft.tags.TagKey<net.minecraft.world.level.material.Fluid> fluidTag =
+                            (net.minecraft.tags.TagKey<net.minecraft.world.level.material.Fluid>) tagKey;
+                    net.minecraft.core.registries.BuiltInRegistries.FLUID.getTag(fluidTag)
+                            .ifPresent(holders -> holders.forEach(holder -> ids.add(String.valueOf(
+                                    net.minecraft.core.registries.BuiltInRegistries.FLUID
+                                            .getKey(holder.value())))));
+                }
+                // 只保留真实注册过的流体；标签解析失败会留下 minecraft:fluid 这类假 id
+                ids.removeIf(id -> {
+                    var rl = net.minecraft.resources.ResourceLocation.tryParse(id);
+                    return rl == null || !net.minecraft.core.registries.BuiltInRegistries.FLUID.containsKey(rl);
+                });
+                if (!ids.isEmpty()) {
+                    slots.add(String.join("|", ids) + "#" + amount);
+                }
+            } catch (Throwable ignored) {
+                // 跳过
+            }
         }
     }
 
@@ -735,7 +905,9 @@ public final class RecipeScanner {
                 continue;
             }
             try {
+                int before = out.size();
                 collectSlots(method.invoke(recipe), out);
+                if (out.size() > before) { break; }
             } catch (Throwable ignored) {
                 // 该重载不可用
             }
