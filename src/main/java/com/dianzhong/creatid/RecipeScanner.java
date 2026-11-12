@@ -178,10 +178,23 @@ public final class RecipeScanner {
             }
         }
         // 液体字段单独扫：不管物品槽是否为空都要收集，否则溶解室这类配方会漏掉液体要求
-        for (java.lang.reflect.Field field : recipe.getClass().getFields()) {
+        for (java.lang.reflect.Field field : recipe.getClass().getDeclaredFields()) {
+            try {
+                field.trySetAccessible();
+            } catch (Throwable ignored) {
+                continue;
+            }
             String fieldType = field.getType().getName().toLowerCase(java.util.Locale.ROOT);
             String fieldName = field.getName().toLowerCase(java.util.Locale.ROOT);
-            if (!fieldType.contains("fluid") && !fieldName.contains("fluid")) {
+            String simpleName = field.getName().toLowerCase(java.util.Locale.ROOT);
+            boolean extraInput = fieldType.contains("fluid") || simpleName.contains("fluid")
+                    || simpleName.contains("modifier");
+            // 充能台：modifiers 是周围材料，base 是底座，都算输入
+            if (recipe.getClass().getName().startsWith("de.ellpeck.actuallyadditions")
+                    && (simpleName.equals("base") || simpleName.contains("modifier"))) {
+                extraInput = true;
+            }
+            if (!extraInput) {
                 continue;
             }
             if (fieldName.contains("output")) {
